@@ -7,8 +7,10 @@ import lexer.TokenType;
 import util.SourceReader;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -19,8 +21,8 @@ public class Main {
             return;
         }
 
-        Path input = Path.of(args[0]);
-        Path outDir = Path.of("out");
+        Path input = Paths.get(args[0]);
+        Path outDir = Paths.get("out");
         Files.createDirectories(outDir);
 
         ErrorManager em = new ErrorManager();
@@ -35,13 +37,16 @@ public class Main {
             if (t.type == TokenType.EOF) break;
         }
 
-        Files.writeString(outDir.resolve("tokens.txt"), String.join("\n", tokenLines));
+        // Java 8-10: no Files.writeString
+        Files.write(outDir.resolve("tokens.txt"),
+                String.join("\n", tokenLines).getBytes(StandardCharsets.UTF_8));
 
         if (em.hasErrors()) {
-            Files.writeString(outDir.resolve("errors.txt"), String.join("\n", em.getErrors()));
+            Files.write(outDir.resolve("errors.txt"),
+                    String.join("\n", em.getErrors()).getBytes(StandardCharsets.UTF_8));
             System.out.println("Compilación con errores léxicos. Ver out/errors.txt");
         } else {
-            Files.writeString(outDir.resolve("errors.txt"), "");
+            Files.write(outDir.resolve("errors.txt"), new byte[0]);
             System.out.println("Léxico OK. Ver out/tokens.txt");
         }
     }

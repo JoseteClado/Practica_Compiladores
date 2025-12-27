@@ -10,9 +10,9 @@ public class SourceReader {
     private int line = 1;
     private int col = 1;
 
-    public SourceReader(Path path) throws IOException {
-        this.input = Files.readString(path);
-    }
+public SourceReader(Path path) throws IOException {
+    this.input = new String(Files.readAllBytes(path));
+}
 
     public boolean isEOF() {
         return idx >= input.length();
