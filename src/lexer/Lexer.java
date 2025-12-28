@@ -102,6 +102,7 @@ public class Lexer {
         boolean again;
         do {
             again = false;
+
             // whitespace
             while (!r.isEOF() && Character.isWhitespace(r.peek())) r.next();
 
@@ -127,61 +128,98 @@ public class Lexer {
         return sb.toString();
     }
 
+    /**
+     * Recuperación para literales char mal formados:
+     * consume hasta encontrar ' (cierre) o hasta ; o salto de línea o EOF.
+     * Si encuentra ', lo consume también.
+     */
+    private String recoverBadCharLiteral(StringBuilder lex) {
+        while (!r.isEOF()) {
+            char p = r.peek();
+            if (p == '\'') { // cierre encontrado
+                lex.append(r.next());
+                break;
+            }
+            if (p == ';' || p == '\n') { // sincronización (no consumir ';')
+                break;
+            }
+            lex.append(r.next());
+        }
+        return lex.toString();
+    }
+
     private Token readCharLiteral() {
         int line = r.getLine();
         int col  = r.getCol();
+
         StringBuilder lex = new StringBuilder();
-        lex.append(r.next()); // '
+        lex.append(r.next()); // consume '
 
         if (r.isEOF()) {
             err.addLexical(line, col, "Literal char sin cerrar");
-            return new Token(TokenType.ERROR, lex.toString(), null, line, col);
+            String bad = recoverBadCharLiteral(lex);
+            return new Token(TokenType.ERROR, bad, null, line, col);
         }
 
         char c = r.next();
         lex.append(c);
 
         char value;
+
+        if (c == '\n' || c == '\r') {
+            err.addLexical(line, col, "Literal char inválido o sin cierre");
+            String bad = recoverBadCharLiteral(lex);
+            return new Token(TokenType.ERROR, bad, null, line, col);
+        }
+
         if (c == '\\') { // escape
             if (r.isEOF()) {
                 err.addLexical(line, col, "Escape incompleto en literal char");
-                return new Token(TokenType.ERROR, lex.toString(), null, line, col);
+                String bad = recoverBadCharLiteral(lex);
+                return new Token(TokenType.ERROR, bad, null, line, col);
             }
+
             char e = r.next();
             lex.append(e);
-            
-            switch (e) {
-    case 'n':
-        value = '\n';
-        break;
-    case 't':
-        value = '\t';
-        break;
-    case '\'':
-        value = '\'';
-        break;
-    case '\\':
-        value = '\\';
-        break;
-    default:
-        value = e; // simplificación
-        break;
-}
 
-            
+            switch (e) {
+                case 'n':
+                    value = '\n';
+                    break;
+                case 't':
+                    value = '\t';
+                    break;
+                case '\'':
+                    value = '\'';
+                    break;
+                case '\\':
+                    value = '\\';
+                    break;
+                default:
+                    value = e; // simplificación
+                    break;
+            }
         } else {
             value = c;
         }
 
+        // Debe cerrar con '
         if (r.peek() != '\'') {
             err.addLexical(line, col, "Literal char inválido o sin cierre");
-            return new Token(TokenType.ERROR, lex.toString(), null, line, col);
+            String bad = recoverBadCharLiteral(lex);
+            return new Token(TokenType.ERROR, bad, null, line, col);
         }
-        lex.append(r.next()); // cierre '
+
+        lex.append(r.next()); // consume cierre '
 
         return new Token(TokenType.CHAR_LIT, lex.toString(), value, line, col);
     }
 
-    private boolean isLetter(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
-    private boolean isDigit(char c)  { return (c >= '0' && c <= '9'); }
+    private boolean isLetter(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    }
+
+    private boolean isDigit(char c) {
+        return (c >= '0' && c <= '9');
+    }
 }

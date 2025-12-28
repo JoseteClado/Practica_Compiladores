@@ -1,0 +1,16 @@
+program {
+  int x;
+  x = 5 + 3;
+
+  x = x @ 2;
+  x = x € 1;
+
+  char c;
+  c = 'A;
+
+  bool ok;
+  ok = true | false;
+
+  print(x);
+}
+
