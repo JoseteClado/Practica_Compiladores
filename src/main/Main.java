@@ -41,7 +41,9 @@ public class Main {
         while (true) {
             Token t = lexer1.nextToken();
             tokenLines.add(t.toString());
-            if (t.type == TokenType.EOF) break;
+            if (t.type == TokenType.EOF) {
+                break;
+            }
         }
         writeUtf8(outDir.resolve("tokens.txt"), String.join("\n", tokenLines));
 
@@ -57,15 +59,21 @@ public class Main {
         // =========================
         ErrorManager emSyn = new ErrorManager();
         Lexer lexer2 = new Lexer(new SourceReader(input), emSyn);
+
         Parser p = new Parser(lexer2, emSyn);
         p.parseProgram();
 
+        // SIEMPRE generamos entregables
+        writeUtf8(outDir.resolve("symbols.txt"), p.getSymbolTable().dump());
+        writeUtf8(outDir.resolve("intermediate.txt"), p.getIR().getCode());
+
         if (emSyn.hasErrors()) {
             writeUtf8(outDir.resolve("errors.txt"), String.join("\n", emSyn.getErrors()));
-            System.out.println("Errores sintácticos. Ver out/errors.txt");
+            System.out.println("Errores detectados. Ver out/errors.txt");
         } else {
             writeUtf8(outDir.resolve("errors.txt"), "");
-            System.out.println("Sintaxis OK. (tokens.txt generado en out/tokens.txt)");
+            System.out.println("OK. (tokens.txt, symbols.txt, intermediate.txt en out/)");
         }
+
     }
 }

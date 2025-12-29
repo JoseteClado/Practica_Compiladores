@@ -6,20 +6,29 @@ import lexer.Token;
 import lexer.TokenType;
 import sem.SymbolTable;
 import sem.Type;
+import ir.IRBuilder;
+import ir.ExprRes;
 
 public class Parser {
     private final Lexer lexer;
     private final ErrorManager err;
     private Token lookahead;
 
-    // Tabla de símbolos (ámbitos)
+    // Semántica
     private final SymbolTable st = new SymbolTable();
+
+    // IR
+    private final IRBuilder ir = new IRBuilder();
 
     public Parser(Lexer lexer, ErrorManager err) {
         this.lexer = lexer;
         this.err = err;
         this.lookahead = lexer.nextToken();
+        while (lookahead.type == TokenType.ERROR) lookahead = lexer.nextToken();
     }
+
+    public SymbolTable getSymbolTable() { return st; }
+    public IRBuilder getIR() { return ir; }
 
     // --------- API ---------
     public void parseProgram() {
@@ -31,20 +40,14 @@ public class Parser {
     // --------- Helpers ---------
     private void advance() {
         lookahead = lexer.nextToken();
-        // si el lexer devuelve ERROR, lo saltamos para poder seguir parseando
-        while (lookahead.type == TokenType.ERROR) {
-            lookahead = lexer.nextToken();
-        }
+        while (lookahead.type == TokenType.ERROR) lookahead = lexer.nextToken();
     }
 
-    private boolean check(TokenType t) {
-        return lookahead.type == t;
-    }
+    private boolean check(TokenType t) { return lookahead.type == t; }
 
     private void match(TokenType t, String msg) {
-        if (check(t)) {
-            advance();
-        } else {
+        if (check(t)) advance();
+        else {
             syntaxError(msg + " (encontrado: " + lookahead.type + " '" + lookahead.lexeme + "')");
             panicRecover(t);
         }
@@ -58,9 +61,6 @@ public class Parser {
         err.addLexical(lookahead.line, lookahead.column, "[SEM] " + msg);
     }
 
-    /**
-     * Recuperación simple: avanzar hasta encontrar el token esperado o un punto de sincronización.
-     */
     private void panicRecover(TokenType expected) {
         while (!check(TokenType.EOF)
                 && !check(expected)
@@ -85,24 +85,18 @@ public class Parser {
     }
 
     private void parseDecls() {
-        while (isTypeToken(lookahead.type)) {
-            parseDecl();
-        }
+        while (isTypeToken(lookahead.type)) parseDecl();
     }
 
     private void parseDecl() {
         Type t = parseTypeReturn();
 
-        // Guardamos nombre ANTES de consumir ID
         String name = lookahead.lexeme;
         match(TokenType.ID, "Se esperaba un identificador en declaración");
 
-        // Semántica: no redeclarar en el mismo ámbito
         if (t != Type.ERROR) {
             boolean ok = st.declare(name, t);
-            if (!ok) {
-                semanticError("Variable redeclarada en el mismo ámbito: " + name);
-            }
+            if (!ok) semanticError("Variable redeclarada en el mismo ámbito: " + name);
         }
 
         match(TokenType.SEMI, "Falta ';' al final de la declaración");
@@ -114,7 +108,6 @@ public class Parser {
         if (check(TokenType.CHAR)) { advance(); return Type.CHAR; }
 
         syntaxError("Se esperaba un tipo (int/bool/char)");
-        // recuperamos como podamos
         advance();
         return Type.ERROR;
     }
@@ -124,9 +117,7 @@ public class Parser {
     }
 
     private void parseStmts() {
-        while (isStmtStart(lookahead.type)) {
-            parseStmt();
-        }
+        while (isStmtStart(lookahead.type)) parseStmt();
     }
 
     private boolean isStmtStart(TokenType t) {
@@ -148,29 +139,19 @@ public class Parser {
             match(TokenType.SEMI, "Falta ';' al final de print");
             return;
         }
-        if (check(TokenType.IF)) {
-            parseIf();
-            return;
-        }
-        if (check(TokenType.WHILE)) {
-            parseWhile();
-            return;
-        }
-        if (check(TokenType.LBRACE)) {
-            parseBlock();
-            return;
-        }
+        if (check(TokenType.IF)) { parseIf(); return; }
+        if (check(TokenType.WHILE)) { parseWhile(); return; }
+        if (check(TokenType.LBRACE)) { parseBlock(); return; }
 
         syntaxError("Inicio de sentencia no válido");
         advance();
     }
 
+    // --------- Statements + IR ---------
     private void parseAssign() {
-        // Capturamos el nombre antes de consumir ID
         String name = lookahead.lexeme;
         match(TokenType.ID, "Se esperaba ID en asignación");
 
-        // Semántica: variable declarada
         Type varType = st.lookup(name);
         if (varType == null) {
             semanticError("Variable no declarada: " + name);
@@ -179,35 +160,52 @@ public class Parser {
 
         match(TokenType.ASSIGN, "Se esperaba '=' en asignación");
 
-        Type exprType = parseExprType();
+        ExprRes e = parseExprIR();
 
-        // Semántica: tipos compatibles
-        if (varType != Type.ERROR && exprType != Type.ERROR && varType != exprType) {
-            semanticError("Asignación incompatible: " + name + " es " + varType + " y la expresión es " + exprType);
+        if (varType != Type.ERROR && e.type != Type.ERROR && varType != e.type) {
+            semanticError("Asignación incompatible: " + name + " es " + varType + " y la expresión es " + e.type);
         }
+
+        // IR: copy expr -> var
+        ir.emit("copy", e.r, null, name);
     }
 
     private void parsePrint() {
         match(TokenType.PRINT, "Se esperaba 'print'");
         match(TokenType.LPAREN, "Se esperaba '(' tras print");
-        parseExprType(); // puede imprimirse cualquier tipo (mínimo)
+        ExprRes e = parseExprIR();
         match(TokenType.RPAREN, "Se esperaba ')' en print");
+
+        // IR: print x
+        ir.emit("print", e.r, null, null);
     }
 
     private void parseIf() {
         match(TokenType.IF, "Se esperaba 'if'");
         match(TokenType.LPAREN, "Se esperaba '(' tras if");
 
-        Type cond = parseExprType();
-        if (cond != Type.BOOL && cond != Type.ERROR) {
+        ExprRes cond = parseExprIR();
+        if (cond.type != Type.BOOL && cond.type != Type.ERROR) {
             semanticError("La condición del if debe ser BOOL");
         }
 
         match(TokenType.RPAREN, "Se esperaba ')' tras condición");
-        parseStmt(); // permite stmt o block
+
+        String Lelse = ir.newLabel();
+        String Lend  = ir.newLabel();
+
+        // false = 0
+        ir.emit("if_EQ", cond.r, "0", Lelse);
+        parseStmt();
+
         if (check(TokenType.ELSE)) {
+            ir.emit("goto", Lend, null, null);
+            ir.emitLabel(Lelse);
             advance();
             parseStmt();
+            ir.emitLabel(Lend);
+        } else {
+            ir.emitLabel(Lelse);
         }
     }
 
@@ -215,148 +213,222 @@ public class Parser {
         match(TokenType.WHILE, "Se esperaba 'while'");
         match(TokenType.LPAREN, "Se esperaba '(' tras while");
 
-        Type cond = parseExprType();
-        if (cond != Type.BOOL && cond != Type.ERROR) {
+        String Lstart = ir.newLabel();
+        String Lend   = ir.newLabel();
+
+        ir.emitLabel(Lstart);
+
+        ExprRes cond = parseExprIR();
+        if (cond.type != Type.BOOL && cond.type != Type.ERROR) {
             semanticError("La condición del while debe ser BOOL");
         }
 
         match(TokenType.RPAREN, "Se esperaba ')' tras condición");
+
+        ir.emit("if_EQ", cond.r, "0", Lend);
         parseStmt();
+        ir.emit("goto", Lstart, null, null);
+        ir.emitLabel(Lend);
     }
 
-    // --------- Expressions with precedence (DEVUELVEN TYPE) ---------
-    private Type parseExprType() { return parseOr(); }
+    // --------- Expressions with precedence (SEM + IR) ---------
+    private ExprRes parseExprIR() { return parseOr(); }
 
-    private Type parseOr() {
-        Type left = parseAnd();
+    private ExprRes parseOr() {
+        ExprRes left = parseAnd();
         while (check(TokenType.OROR)) {
             advance();
-            Type right = parseAnd();
-            if (left != Type.BOOL || right != Type.BOOL) {
+            ExprRes right = parseAnd();
+
+            if (left.type != Type.BOOL || right.type != Type.BOOL) {
                 semanticError("'||' requiere operandos BOOL");
-                left = Type.ERROR;
+                left = new ExprRes(Type.ERROR, left.r);
             } else {
-                left = Type.BOOL;
+                String t = ir.newTemp();
+                ir.emit("or", left.r, right.r, t);
+                left = new ExprRes(Type.BOOL, t);
             }
         }
         return left;
     }
 
-    private Type parseAnd() {
-        Type left = parseEq();
+    private ExprRes parseAnd() {
+        ExprRes left = parseEq();
         while (check(TokenType.ANDAND)) {
             advance();
-            Type right = parseEq();
-            if (left != Type.BOOL || right != Type.BOOL) {
+            ExprRes right = parseEq();
+
+            if (left.type != Type.BOOL || right.type != Type.BOOL) {
                 semanticError("'&&' requiere operandos BOOL");
-                left = Type.ERROR;
+                left = new ExprRes(Type.ERROR, left.r);
             } else {
-                left = Type.BOOL;
+                String t = ir.newTemp();
+                ir.emit("and", left.r, right.r, t);
+                left = new ExprRes(Type.BOOL, t);
             }
         }
         return left;
     }
 
-    private Type parseEq() {
-        Type left = parseRel();
+    private ExprRes parseEq() {
+        ExprRes left = parseRel();
         while (check(TokenType.EQEQ) || check(TokenType.NEQ)) {
+            TokenType op = lookahead.type;
             advance();
-            Type right = parseRel();
+            ExprRes right = parseRel();
 
-            if (left == Type.ERROR || right == Type.ERROR) {
-                left = Type.ERROR;
-            } else if (left != right) {
+            if (left.type == Type.ERROR || right.type == Type.ERROR) {
+                left = new ExprRes(Type.ERROR, left.r);
+                continue;
+            }
+            if (left.type != right.type) {
                 semanticError("'=='/'!=' requiere operandos del mismo tipo");
-                left = Type.ERROR;
-            } else {
-                left = Type.BOOL;
+                left = new ExprRes(Type.ERROR, left.r);
+                continue;
             }
+
+            // IR boolean resultado 0 / -1
+            String t = ir.newTemp();
+            String e1 = ir.newLabel();
+            String e2 = ir.newLabel();
+
+            ir.emit(op == TokenType.EQEQ ? "if_EQ" : "if_NE", left.r, right.r, e1);
+            ir.emit("copy", "0", null, t);
+            ir.emit("goto", e2, null, null);
+            ir.emitLabel(e1);
+            ir.emit("copy", "-1", null, t);
+            ir.emitLabel(e2);
+
+            left = new ExprRes(Type.BOOL, t);
         }
         return left;
     }
 
-    private Type parseRel() {
-        Type left = parseAdd();
+    private ExprRes parseRel() {
+        ExprRes left = parseAdd();
         while (check(TokenType.LT) || check(TokenType.LE) || check(TokenType.GT) || check(TokenType.GE)) {
+            TokenType op = lookahead.type;
             advance();
-            Type right = parseAdd();
-            if (left != Type.INT || right != Type.INT) {
+            ExprRes right = parseAdd();
+
+            if (left.type != Type.INT || right.type != Type.INT) {
                 semanticError("Comparaciones (<,<=,>,>=) requieren INT");
-                left = Type.ERROR;
-            } else {
-                left = Type.BOOL;
+                left = new ExprRes(Type.ERROR, left.r);
+                continue;
             }
+
+            String t = ir.newTemp();
+            String e1 = ir.newLabel();
+            String e2 = ir.newLabel();
+
+            ir.emit("if_" + relMnemonic(op), left.r, right.r, e1);
+            ir.emit("copy", "0", null, t);
+            ir.emit("goto", e2, null, null);
+            ir.emitLabel(e1);
+            ir.emit("copy", "-1", null, t);
+            ir.emitLabel(e2);
+
+            left = new ExprRes(Type.BOOL, t);
         }
         return left;
     }
 
-    private Type parseAdd() {
-        Type left = parseMul();
+    private String relMnemonic(TokenType t) {
+        switch (t) {
+            case LT: return "LT";
+            case LE: return "LE";
+            case GT: return "GT";
+            case GE: return "GE";
+            default: return "??";
+        }
+    }
+
+    private ExprRes parseAdd() {
+        ExprRes left = parseMul();
         while (check(TokenType.PLUS) || check(TokenType.MINUS)) {
             TokenType op = lookahead.type;
             advance();
-            Type right = parseMul();
-            if (left != Type.INT || right != Type.INT) {
-                semanticError("Operador '" + (op == TokenType.PLUS ? "+" : "-") + "' requiere INT");
-                left = Type.ERROR;
-            } else {
-                left = Type.INT;
+            ExprRes right = parseMul();
+
+            if (left.type != Type.INT || right.type != Type.INT) {
+                semanticError("'+/-' requiere INT");
+                left = new ExprRes(Type.ERROR, left.r);
+                continue;
             }
+
+            String t = ir.newTemp();
+            ir.emit(op == TokenType.PLUS ? "add" : "sub", left.r, right.r, t);
+            left = new ExprRes(Type.INT, t);
         }
         return left;
     }
 
-    private Type parseMul() {
-        Type left = parseUnary();
+    private ExprRes parseMul() {
+        ExprRes left = parseUnary();
         while (check(TokenType.STAR) || check(TokenType.SLASH) || check(TokenType.MOD)) {
             TokenType op = lookahead.type;
             advance();
-            Type right = parseUnary();
-            if (left != Type.INT || right != Type.INT) {
-                String sym = (op == TokenType.STAR ? "*" : (op == TokenType.SLASH ? "/" : "%"));
-                semanticError("Operador '" + sym + "' requiere INT");
-                left = Type.ERROR;
-            } else {
-                left = Type.INT;
+            ExprRes right = parseUnary();
+
+            if (left.type != Type.INT || right.type != Type.INT) {
+                semanticError("'*//%' requiere INT");
+                left = new ExprRes(Type.ERROR, left.r);
+                continue;
             }
+
+            String t = ir.newTemp();
+            String irOp = (op == TokenType.STAR) ? "prod" : (op == TokenType.SLASH ? "div" : "mod");
+            ir.emit(irOp, left.r, right.r, t);
+            left = new ExprRes(Type.INT, t);
         }
         return left;
     }
 
-    private Type parseUnary() {
+    private ExprRes parseUnary() {
         if (check(TokenType.NOT)) {
             advance();
-            Type t = parseUnary();
-            if (t != Type.BOOL && t != Type.ERROR) {
-                semanticError("'!' requiere BOOL");
-                return Type.ERROR;
-            }
-            return (t == Type.ERROR) ? Type.ERROR : Type.BOOL;
+            ExprRes e = parseUnary();
+            if (e.type != Type.BOOL && e.type != Type.ERROR) semanticError("'!' requiere BOOL");
+            String t = ir.newTemp();
+            ir.emit("not", e.r, null, t);
+            return new ExprRes(e.type == Type.ERROR ? Type.ERROR : Type.BOOL, t);
         }
         if (check(TokenType.MINUS)) {
             advance();
-            Type t = parseUnary();
-            if (t != Type.INT && t != Type.ERROR) {
-                semanticError("'-' unario requiere INT");
-                return Type.ERROR;
-            }
-            return (t == Type.ERROR) ? Type.ERROR : Type.INT;
+            ExprRes e = parseUnary();
+            if (e.type != Type.INT && e.type != Type.ERROR) semanticError("'-' unario requiere INT");
+            String t = ir.newTemp();
+            ir.emit("neg", e.r, null, t);
+            return new ExprRes(e.type == Type.ERROR ? Type.ERROR : Type.INT, t);
         }
         return parsePrimary();
     }
 
-    private Type parsePrimary() {
+    private ExprRes parsePrimary() {
         if (check(TokenType.NUM)) {
+            String v = lookahead.lexeme;
             advance();
-            return Type.INT;
+            String t = ir.newTemp();
+            ir.emit("copy", v, null, t);
+            return new ExprRes(Type.INT, t);
         }
+
         if (check(TokenType.CHAR_LIT)) {
+            // si vuestro lexeme es "'A'" podéis convertirlo a número ASCII o guardar literal tal cual.
+            // Para simplificar: lo dejamos como lexeme (p.ej. 'A') y lo copiamos.
+            String v = lookahead.lexeme;
             advance();
-            return Type.CHAR;
+            String t = ir.newTemp();
+            ir.emit("copy", v, null, t);
+            return new ExprRes(Type.CHAR, t);
         }
+
         if (check(TokenType.TRUE) || check(TokenType.FALSE)) {
+            String v = check(TokenType.TRUE) ? "-1" : "0"; // bool: true=-1, false=0
             advance();
-            return Type.BOOL;
+            String t = ir.newTemp();
+            ir.emit("copy", v, null, t);
+            return new ExprRes(Type.BOOL, t);
         }
 
         if (check(TokenType.ID)) {
@@ -365,20 +437,21 @@ public class Parser {
             Type t = st.lookup(name);
             if (t == null) {
                 semanticError("Variable no declarada: " + name);
-                return Type.ERROR;
+                return new ExprRes(Type.ERROR, name);
             }
-            return t;
+            // Para IDs devolvemos el nombre como “lugar”
+            return new ExprRes(t, name);
         }
 
         if (check(TokenType.LPAREN)) {
             advance();
-            Type t = parseExprType();
+            ExprRes e = parseExprIR();
             match(TokenType.RPAREN, "Se esperaba ')'");
-            return t;
+            return e;
         }
 
         syntaxError("Expresión inválida");
         advance();
-        return Type.ERROR;
+        return new ExprRes(Type.ERROR, "<?>");
     }
 }

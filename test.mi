@@ -1,9 +1,5 @@
 program {
-  int c;
   int x;
-  c = 2;
-  x = 3;
-  if (c < x) { print(1); }
+  x = 1 + 2 * 3;
+  print(x);
 }
-
-
